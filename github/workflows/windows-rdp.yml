@@ -1,1 +1,1223 @@
+name: Amir Windows VPS
 
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Select VPS mode"
+        required: true
+        type: choice
+        default: master
+        options:
+          - master
+          - restore
+
+concurrency:
+  group: amir-windows-vps
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  windows-vps:
+    name: Windows VPS
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      VPS_USERNAME: "CynetAdmin"
+      VPS_PASSWORD: "Amir@123456"
+
+      TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+      BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+
+      VPS_ROOT: C:\AmirVPS
+      BACKUP_NAME: amir-master-backup
+
+      HERMES_LOCAL: C:\Users\CynetAdmin\AppData\Local\hermes
+      HERMES_ROAMING: C:\Users\CynetAdmin\AppData\Roaming\Hermes
+      NINEROUTER_DATA: C:\Users\CynetAdmin\AppData\Roaming\9router
+
+    steps:
+
+      # ==================================================
+      # SYSTEM
+      # ==================================================
+
+      - name: System information
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " AMIR WINDOWS VPS"
+          Write-Host "======================================"
+
+          Write-Host "Computer: $env:COMPUTERNAME"
+          Write-Host "User: $env:USERNAME"
+
+          Get-ComputerInfo |
+            Select-Object WindowsProductName,
+                          WindowsVersion,
+                          OsBuildNumber
+
+
+      # ==================================================
+      # VPS TIMER
+      # ==================================================
+
+      - name: Initialize VPS timer
+        shell: pwsh
+        run: |
+          $start = (Get-Date).ToUniversalTime()
+
+          "VPS_SESSION_START=$($start.ToString('o'))" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+          Write-Host "VPS session started:"
+          Write-Host $start
+
+
+      # ==================================================
+      # RDP USER
+      # ==================================================
+
+      - name: Create RDP administrator
+        shell: pwsh
+        run: |
+          $password = ConvertTo-SecureString `
+            $env:VPS_PASSWORD `
+            -AsPlainText `
+            -Force
+
+          $user = Get-LocalUser `
+            -Name $env:VPS_USERNAME `
+            -ErrorAction SilentlyContinue
+
+          if ($null -eq $user) {
+
+            New-LocalUser `
+              -Name $env:VPS_USERNAME `
+              -Password $password `
+              -FullName "Cynet Admin" `
+              -Description "Amir VPS Administrator" `
+              -PasswordNeverExpires
+
+          }
+          else {
+
+            Set-LocalUser `
+              -Name $env:VPS_USERNAME `
+              -Password $password `
+              -PasswordNeverExpires $true
+          }
+
+          Add-LocalGroupMember `
+            -Group "Administrators" `
+            -Member $env:VPS_USERNAME `
+            -ErrorAction SilentlyContinue
+
+          Add-LocalGroupMember `
+            -Group "Remote Desktop Users" `
+            -Member $env:VPS_USERNAME `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "VPS user ready: $env:VPS_USERNAME"
+
+
+      # ==================================================
+      # RDP
+      # ==================================================
+
+      - name: Enable RDP
+        shell: pwsh
+        run: |
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          Enable-NetFirewallRule `
+            -DisplayGroup "Remote Desktop" `
+            -ErrorAction SilentlyContinue
+
+          Set-Service `
+            -Name "TermService" `
+            -StartupType Automatic
+
+          Start-Service `
+            -Name "TermService" `
+            -ErrorAction SilentlyContinue
+
+          Write-Host "RDP enabled."
+
+
+      # ==================================================
+      # TAILSCALE
+      # ==================================================
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          winget install `
+            --id Tailscale.Tailscale `
+            --exact `
+            --silent `
+            --accept-package-agreements `
+            --accept-source-agreements
+
+          $paths = @(
+            "C:\Program Files\Tailscale\tailscale.exe",
+            "C:\Program Files (x86)\Tailscale\tailscale.exe"
+          )
+
+          $tailscale = $paths |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+
+          if (-not $tailscale) {
+            throw "Tailscale was not found."
+          }
+
+          Write-Host "Tailscale: $tailscale"
+
+          & $tailscale up `
+            --authkey="$env:TAILSCALE_AUTHKEY" `
+            --hostname="amir-vps"
+
+          Start-Sleep -Seconds 10
+
+          Write-Host ""
+          Write-Host "Tailscale status:"
+          & $tailscale status
+
+          Write-Host ""
+          Write-Host "Tailscale IP:"
+          & $tailscale ip -4
+
+
+      # ==================================================
+      # DIRECTORIES
+      # ==================================================
+
+      - name: Prepare VPS directories
+        shell: pwsh
+        run: |
+          New-Item `
+            -ItemType Directory `
+            -Path "$env:VPS_ROOT" `
+            -Force | Out-Null
+
+          New-Item `
+            -ItemType Directory `
+            -Path "$env:VPS_ROOT\Backup" `
+            -Force | Out-Null
+
+          New-Item `
+            -ItemType Directory `
+            -Path "$env:VPS_ROOT\State" `
+            -Force | Out-Null
+
+          New-Item `
+            -ItemType Directory `
+            -Path "$env:VPS_ROOT\Restore" `
+            -Force | Out-Null
+
+          New-Item `
+            -ItemType Directory `
+            -Path "$env:VPS_ROOT\BackupData" `
+            -Force | Out-Null
+
+
+      # ==================================================
+      # MASTER - WAIT FOR BACKUP REQUEST
+      # ==================================================
+
+      - name: Master - Wait for backup
+        id: master_wait
+        if: ${{ inputs.mode == 'master' }}
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " MASTER MODE"
+          Write-Host "======================================"
+          Write-Host ""
+          Write-Host "Install and configure Hermes manually."
+          Write-Host ""
+          Write-Host "Manual backup command:"
+          Write-Host "New-Item C:\AmirVPS\REQUEST_BACKUP"
+          Write-Host ""
+
+          $start = [DateTime]::Parse(
+            $env:VPS_SESSION_START
+          ).ToUniversalTime()
+
+          $automaticBackupTime = $start.AddMinutes(300)
+
+          # Stop working before GitHub's 360 minute limit
+          $sessionEnd = $start.AddMinutes(355)
+
+          $backupRequested = $false
+
+          while ((Get-Date).ToUniversalTime() -lt $sessionEnd) {
+
+            $now = (Get-Date).ToUniversalTime()
+
+            # ------------------------------------------
+            # MANUAL BACKUP
+            # ------------------------------------------
+
+            if (Test-Path "$env:VPS_ROOT\REQUEST_BACKUP") {
+
+              Write-Host "Manual backup requested."
+
+              $backupRequested = $true
+
+              Remove-Item `
+                "$env:VPS_ROOT\REQUEST_BACKUP" `
+                -Force `
+                -ErrorAction SilentlyContinue
+
+              break
+            }
+
+            # ------------------------------------------
+            # AUTOMATIC BACKUP AT 5 HOURS
+            # ------------------------------------------
+
+            if ($now -ge $automaticBackupTime) {
+
+              Write-Host "Automatic 5-hour backup triggered."
+
+              $backupRequested = $true
+
+              break
+            }
+
+            Start-Sleep -Seconds 30
+          }
+
+          if ($backupRequested) {
+
+            "backup_requested=true" |
+              Out-File `
+                -FilePath $env:GITHUB_OUTPUT `
+                -Append `
+                -Encoding utf8
+
+          }
+          else {
+
+            Write-Host "No backup was requested."
+
+            "backup_requested=false" |
+              Out-File `
+                -FilePath $env:GITHUB_OUTPUT `
+                -Append `
+                -Encoding utf8
+          }
+
+
+      # ==================================================
+      # MASTER - BACKUP HERMES
+      # ==================================================
+
+      - name: Master - Backup Hermes
+        if: ${{ inputs.mode == 'master' && steps.master_wait.outputs.backup_requested == 'true' }}
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " BACKING UP HERMES"
+          Write-Host "======================================"
+
+          $backupData = "$env:VPS_ROOT\BackupData"
+
+          Remove-Item `
+            "$backupData\*" `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          New-Item `
+            -ItemType Directory `
+            -Path "$backupData\Hermes\Local" `
+            -Force | Out-Null
+
+          New-Item `
+            -ItemType Directory `
+            -Path "$backupData\Hermes\Roaming" `
+            -Force | Out-Null
+
+          # ------------------------------------------
+          # HERMES LOCAL
+          # ------------------------------------------
+
+          if (Test-Path $env:HERMES_LOCAL) {
+
+            Write-Host "Backing up Hermes Local..."
+
+            robocopy `
+              $env:HERMES_LOCAL `
+              "$backupData\Hermes\Local" `
+              /E `
+              /COPY:DAT `
+              /DCOPY:DAT `
+              /R:2 `
+              /W:2 `
+              /XJ `
+              /NFL `
+              /NDL `
+              /NP
+
+            $code = $LASTEXITCODE
+
+            if ($code -gt 7) {
+              throw "Hermes Local backup failed. Robocopy code: $code"
+            }
+          }
+          else {
+            Write-Warning "Hermes Local directory not found."
+          }
+
+          # ------------------------------------------
+          # HERMES ROAMING
+          # ------------------------------------------
+
+          if (Test-Path $env:HERMES_ROAMING) {
+
+            Write-Host "Backing up Hermes Roaming..."
+
+            robocopy `
+              $env:HERMES_ROAMING `
+              "$backupData\Hermes\Roaming" `
+              /E `
+              /COPY:DAT `
+              /DCOPY:DAT `
+              /R:2 `
+              /W:2 `
+              /XJ `
+              /NFL `
+              /NDL `
+              /NP
+
+            $code = $LASTEXITCODE
+
+            if ($code -gt 7) {
+              throw "Hermes Roaming backup failed. Robocopy code: $code"
+            }
+          }
+          else {
+            Write-Warning "Hermes Roaming directory not found."
+          }
+
+          if (
+            -not (Test-Path "$backupData\Hermes\Local") -and
+            -not (Test-Path "$backupData\Hermes\Roaming")
+          ) {
+            throw "No Hermes data was found."
+          }
+
+          Write-Host ""
+          Write-Host "Hermes backup data prepared."
+
+          # Robocopy uses 0-7 for successful/non-fatal results.
+          # Force this PowerShell step to report success after validation.
+          exit 0
+
+
+      # ==================================================
+      # MASTER - BACKUP 9ROUTER
+      # ==================================================
+
+      - name: Master - Backup 9Router
+        if: ${{ inputs.mode == 'master' && steps.master_wait.outputs.backup_requested == 'true' }}
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " BACKING UP 9ROUTER"
+          Write-Host "======================================"
+
+          $backupData = "$env:VPS_ROOT\BackupData"
+          $source = $env:NINEROUTER_DATA
+          $destination = "$backupData\9Router\Data"
+          $versionFile = "$backupData\9Router\version.txt"
+
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+
+          if (-not (Test-Path $source)) {
+            throw "9Router data directory was not found: $source"
+          }
+
+          # Record the exact installed package version so Restore can install
+          # the same 9Router release instead of relying on the latest release.
+          $pkg = npm list -g 9router --depth=0 2>$null | Select-String '9router@' | Select-Object -First 1
+          if (-not $pkg) {
+            throw "Installed 9Router package version could not be detected."
+          }
+
+          $match = [regex]::Match($pkg.ToString(), '9router@([^\s]+)')
+          if (-not $match.Success) {
+            throw "Could not parse installed 9Router version."
+          }
+
+          $version = $match.Groups[1].Value
+          $version | Out-File -FilePath $versionFile -Encoding utf8 -Force
+
+          Write-Host "9Router version: $version"
+          Write-Host "9Router data: $source"
+
+          robocopy `
+            $source `
+            $destination `
+            /E `
+            /COPY:DAT `
+            /DCOPY:DAT `
+            /R:2 `
+            /W:2 `
+            /XJ `
+            /NFL `
+            /NDL `
+            /NP
+
+          $code = $LASTEXITCODE
+          if ($code -gt 7) {
+            throw "9Router backup failed. Robocopy code: $code"
+          }
+
+          if (-not (Test-Path "$destination\db\data.sqlite")) {
+            throw "9Router database was not included in the backup."
+          }
+
+          Write-Host "9Router backup data prepared successfully."
+          exit 0
+
+
+      # ==================================================
+      # MASTER - 7ZIP
+      # ==================================================
+
+      - name: Master - Prepare 7-Zip
+        if: ${{ inputs.mode == 'master' && steps.master_wait.outputs.backup_requested == 'true' }}
+        shell: pwsh
+        run: |
+          $sevenZipPaths = @(
+            "C:\Program Files\7-Zip\7z.exe",
+            "C:\Program Files (x86)\7-Zip\7z.exe"
+          )
+
+          $sevenZip = $sevenZipPaths |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+
+          if (-not $sevenZip) {
+
+            Write-Host "Installing 7-Zip..."
+
+            winget install `
+              --id 7zip.7zip `
+              --exact `
+              --silent `
+              --accept-source-agreements `
+              --accept-package-agreements
+
+            $sevenZip = $sevenZipPaths |
+              Where-Object { Test-Path $_ } |
+              Select-Object -First 1
+          }
+
+          if (-not $sevenZip) {
+            throw "7-Zip not found."
+          }
+
+          "SEVENZIP=$sevenZip" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+
+      # ==================================================
+      # MASTER - CREATE ENCRYPTED BACKUP
+      # ==================================================
+
+      - name: Master - Create encrypted backup
+        if: ${{ inputs.mode == 'master' && steps.master_wait.outputs.backup_requested == 'true' }}
+        shell: pwsh
+        run: |
+          $archive = "$env:VPS_ROOT\Backup\amir-master-backup.7z"
+
+          Write-Host "Creating encrypted Hermes + 9Router backup..."
+
+          & "$env:SEVENZIP" a `
+            "-t7z" `
+            $archive `
+            "$env:VPS_ROOT\BackupData" `
+            "-p$env:BACKUP_ENCRYPTION_KEY" `
+            "-mhe=on" `
+            "-mx=5" `
+            "-y"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "7-Zip archive creation failed."
+          }
+
+          if (-not (Test-Path $archive)) {
+            throw "Backup archive was not created."
+          }
+
+          $size = (Get-Item $archive).Length
+
+          Write-Host ""
+          Write-Host "Backup created successfully."
+          Write-Host "Backup size: $size bytes"
+
+
+      # ==================================================
+      # MASTER - UPLOAD
+      # ==================================================
+
+      - name: Upload Hermes + 9Router Backup
+        if: ${{ inputs.mode == 'master' && steps.master_wait.outputs.backup_requested == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: amir-master-backup
+          path: C:\AmirVPS\Backup\amir-master-backup.7z
+          compression-level: 0
+          retention-days: 90
+          if-no-files-found: error
+
+
+      # ==================================================
+      # MASTER - KEEP VPS ALIVE
+      # ==================================================
+
+      - name: Master - Keep VPS alive
+        if: ${{ always() && inputs.mode == 'master' }}
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host " VPS STILL RUNNING"
+          Write-Host "======================================"
+
+          $start = [DateTime]::Parse(
+            $env:VPS_SESSION_START
+          ).ToUniversalTime()
+
+          $end = $start.AddMinutes(355)
+
+          Write-Host "VPS will stay alive until:"
+          Write-Host $end
+
+          while ((Get-Date).ToUniversalTime() -lt $end) {
+
+            $remaining = $end - (Get-Date).ToUniversalTime()
+
+            Write-Host (
+              "Remaining: {0:hh\:mm\:ss}" -f $remaining
+            )
+
+            Start-Sleep -Seconds 30
+          }
+
+          Write-Host "Master VPS lifetime finished."
+
+
+      # ==================================================
+      # RESTORE - FIND LAST BACKUP
+      # ==================================================
+
+      - name: Restore - Find backup artifact
+        if: ${{ inputs.mode == 'restore' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Write-Host "======================================"
+          Write-Host " FINDING HERMES + 9ROUTER BACKUP"
+          Write-Host "======================================"
+
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+
+          $repo = $env:GITHUB_REPOSITORY
+
+          $url = "https://api.github.com/repos/$repo/actions/artifacts?per_page=100"
+
+          $response = Invoke-RestMethod `
+            -Uri $url `
+            -Headers $headers `
+            -Method Get
+
+          $artifact = $response.artifacts |
+            Where-Object {
+              $_.name -eq $env:BACKUP_NAME `
+              -and `
+              $_.expired -eq $false
+            } |
+            Sort-Object created_at -Descending |
+            Select-Object -First 1
+
+          if (-not $artifact) {
+            throw "No valid Hermes + 9Router backup artifact was found."
+          }
+
+          Write-Host ""
+          Write-Host "Backup found:"
+          Write-Host "Name: $($artifact.name)"
+          Write-Host "Created: $($artifact.created_at)"
+          Write-Host "Size: $($artifact.size_in_bytes) bytes"
+          Write-Host "Artifact ID: $($artifact.id)"
+
+          "ARTIFACT_ID=$($artifact.id)" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+
+      # ==================================================
+      # RESTORE - DOWNLOAD ARTIFACT
+      # ==================================================
+
+      - name: Restore - Download backup artifact
+        if: ${{ inputs.mode == 'restore' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+          }
+
+          $repo = $env:GITHUB_REPOSITORY
+
+          $url = "https://api.github.com/repos/$repo/actions/artifacts/$env:ARTIFACT_ID/zip"
+
+          $artifactZip = "$env:VPS_ROOT\Restore\artifact.zip"
+
+          Write-Host "Downloading backup artifact..."
+
+          Invoke-WebRequest `
+            -Uri $url `
+            -Headers $headers `
+            -OutFile $artifactZip
+
+          if (-not (Test-Path $artifactZip)) {
+            throw "Artifact download failed."
+          }
+
+          Write-Host "Artifact downloaded."
+
+
+      # ==================================================
+      # RESTORE - EXTRACT GITHUB ARTIFACT
+      # ==================================================
+
+      - name: Restore - Extract artifact
+        if: ${{ inputs.mode == 'restore' }}
+        shell: pwsh
+        run: |
+          $artifactZip = "$env:VPS_ROOT\Restore\artifact.zip"
+
+          $artifactFolder = "$env:VPS_ROOT\Restore\Artifact"
+
+          Remove-Item `
+            $artifactFolder `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          New-Item `
+            -ItemType Directory `
+            -Path $artifactFolder `
+            -Force | Out-Null
+
+          Expand-Archive `
+            -Path $artifactZip `
+            -DestinationPath $artifactFolder `
+            -Force
+
+          $backupArchive = Get-ChildItem `
+            $artifactFolder `
+            -Filter "*.7z" `
+            -File `
+            -Recurse |
+            Select-Object -First 1
+
+          if (-not $backupArchive) {
+            throw "7z backup was not found inside GitHub artifact."
+          }
+
+          Write-Host ""
+          Write-Host "7z backup:"
+          Write-Host $backupArchive.FullName
+
+          "BACKUP_ARCHIVE=$($backupArchive.FullName)" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+
+      # ==================================================
+      # RESTORE - 7ZIP
+      # ==================================================
+
+      - name: Restore - Prepare 7-Zip
+        if: ${{ inputs.mode == 'restore' }}
+        shell: pwsh
+        run: |
+          $sevenZipPaths = @(
+            "C:\Program Files\7-Zip\7z.exe",
+            "C:\Program Files (x86)\7-Zip\7z.exe"
+          )
+
+          $sevenZip = $sevenZipPaths |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+
+          if (-not $sevenZip) {
+
+            winget install `
+              --id 7zip.7zip `
+              --exact `
+              --silent `
+              --accept-source-agreements `
+              --accept-package-agreements
+
+            $sevenZip = $sevenZipPaths |
+              Where-Object { Test-Path $_ } |
+              Select-Object -First 1
+          }
+
+          if (-not $sevenZip) {
+            throw "7-Zip not found."
+          }
+
+          "SEVENZIP=$sevenZip" |
+            Out-File `
+              -FilePath $env:GITHUB_ENV `
+              -Append `
+              -Encoding utf8
+
+
+      # ==================================================
+      # RESTORE - INSTALL 9ROUTER
+      # ==================================================
+
+      - name: Restore - Install 9Router
+        if: ${{ inputs.mode == 'restore' }}
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " INSTALLING 9ROUTER"
+          Write-Host "======================================"
+
+          $versionFile = "$env:VPS_ROOT\Restore\Extracted\9Router\version.txt"
+
+          if (-not (Test-Path $versionFile)) {
+            throw "9Router version file is missing from the backup."
+          }
+
+          $version = (Get-Content $versionFile -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+            throw "Invalid 9Router version in backup: $version"
+          }
+
+          Write-Host "Installing 9Router version: $version"
+
+          npm install -g "9router@$version" --no-audit --no-fund
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "9Router installation failed. Exit code: $LASTEXITCODE"
+          }
+
+          $installed = npm list -g 9router --depth=0 2>$null
+          if ($installed -notmatch "9router@$([regex]::Escape($version))") {
+            throw "Installed 9Router version does not match backup version $version."
+          }
+
+          Write-Host "9Router installed successfully: $version"
+
+
+      # ==================================================
+      # RESTORE - 9ROUTER DATA
+      # ==================================================
+
+      - name: Restore - 9Router data
+        if: ${{ inputs.mode == 'restore' }}
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " RESTORING 9ROUTER DATA"
+          Write-Host "======================================"
+
+          $source = "$env:VPS_ROOT\Restore\Extracted\9Router\Data"
+          $destination = $env:NINEROUTER_DATA
+
+          if (-not (Test-Path $source)) {
+            throw "9Router backup data was not found: $source"
+          }
+
+          New-Item -ItemType Directory -Path $destination -Force | Out-Null
+
+          # Stop any 9Router process that may have been started by the installer
+          # before replacing its user data.
+          Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -and $_.CommandLine -match '(?i)9router' } |
+            ForEach-Object {
+              try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {}
+            }
+
+          Start-Sleep -Seconds 2
+
+          robocopy `
+            $source `
+            $destination `
+            /E `
+            /COPY:DAT `
+            /DCOPY:DAT `
+            /R:2 `
+            /W:2 `
+            /XJ `
+            /NFL `
+            /NDL `
+            /NP
+
+          $code = $LASTEXITCODE
+          if ($code -gt 7) {
+            throw "9Router data restore failed. Robocopy code: $code"
+          }
+
+          if (-not (Test-Path "$destination\db\data.sqlite")) {
+            throw "9Router database was not restored."
+          }
+
+          if (-not (Test-Path "$destination\auth\cli-secret")) {
+            throw "9Router auth data was not restored."
+          }
+
+          Write-Host "9Router data restored successfully."
+          exit 0
+
+
+      # ==================================================
+      # RESTORE - INSTALL HERMES
+      # ==================================================
+
+      - name: Restore - Install Hermes
+        if: ${{ inputs.mode == 'restore' }}
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " INSTALLING HERMES"
+          Write-Host "======================================"
+
+          $password = ConvertTo-SecureString `
+            $env:VPS_PASSWORD `
+            -AsPlainText `
+            -Force
+
+          $credential = New-Object `
+            System.Management.Automation.PSCredential(
+              $env:VPS_USERNAME,
+              $password
+            )
+
+          $installerScript = "$env:VPS_ROOT\Restore\hermes-install.ps1"
+
+          Invoke-WebRequest `
+            -Uri "https://hermes-agent.nousresearch.com/install.ps1" `
+            -OutFile $installerScript
+
+          if (-not (Test-Path $installerScript)) {
+            throw "Hermes installer could not be downloaded."
+          }
+
+          $installCommand = @"
+          Set-ExecutionPolicy -Scope Process Bypass -Force
+          & '$installerScript' -SkipSetup
+          "@
+
+          $encoded = [Convert]::ToBase64String(
+            [Text.Encoding]::Unicode.GetBytes($installCommand)
+          )
+
+          $process = Start-Process `
+            -FilePath "powershell.exe" `
+            -Credential $credential `
+            -ArgumentList `
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-EncodedCommand",
+              $encoded `
+            -Wait `
+            -PassThru
+
+          if ($process.ExitCode -ne 0) {
+            throw "Hermes installation failed. Exit code: $($process.ExitCode)"
+          }
+
+          Start-Sleep -Seconds 20
+
+          if (-not (Test-Path $env:HERMES_LOCAL)) {
+            throw "Hermes installation directory was not created."
+          }
+
+          Write-Host ""
+          Write-Host "Hermes installed successfully."
+          Write-Host "Location:"
+          Write-Host $env:HERMES_LOCAL
+
+
+      # ==================================================
+      # RESTORE - EXTRACT HERMES BACKUP
+      # ==================================================
+
+      - name: Restore - Extract Hermes backup
+        if: ${{ inputs.mode == 'restore' }}
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " EXTRACTING HERMES + 9ROUTER BACKUP"
+          Write-Host "======================================"
+
+          $extractFolder = "$env:VPS_ROOT\Restore\Extracted"
+
+          Remove-Item `
+            $extractFolder `
+            -Recurse `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+          New-Item `
+            -ItemType Directory `
+            -Path $extractFolder `
+            -Force | Out-Null
+
+          & "$env:SEVENZIP" x `
+            "$env:BACKUP_ARCHIVE" `
+            "-o$extractFolder" `
+            "-p$env:BACKUP_ENCRYPTION_KEY" `
+            "-y"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Hermes + 9Router backup extraction failed."
+          }
+
+          Write-Host "Hermes + 9Router backup extracted successfully."
+
+
+      # ==================================================
+      # RESTORE - HERMES DATA
+      # ==================================================
+
+      - name: Restore - Hermes data
+        if: ${{ inputs.mode == 'restore' }}
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " RESTORING HERMES DATA"
+          Write-Host "======================================"
+
+          $sourceLocal = `
+            "$env:VPS_ROOT\Restore\Extracted\Hermes\Local"
+
+          $sourceRoaming = `
+            "$env:VPS_ROOT\Restore\Extracted\Hermes\Roaming"
+
+          # ------------------------------------------
+          # LOCAL
+          # ------------------------------------------
+
+          if (Test-Path $sourceLocal) {
+
+            Write-Host "Restoring Hermes Local..."
+
+            robocopy `
+              $sourceLocal `
+              $env:HERMES_LOCAL `
+              /E `
+              /COPY:DAT `
+              /DCOPY:DAT `
+              /R:2 `
+              /W:2 `
+              /XJ `
+              /NFL `
+              /NDL `
+              /NP
+
+            $code = $LASTEXITCODE
+
+            if ($code -gt 7) {
+              throw "Hermes Local restore failed. Robocopy code: $code"
+            }
+          }
+
+          # ------------------------------------------
+          # ROAMING
+          # ------------------------------------------
+
+          if (Test-Path $sourceRoaming) {
+
+            Write-Host "Restoring Hermes Roaming..."
+
+            New-Item `
+              -ItemType Directory `
+              -Path $env:HERMES_ROAMING `
+              -Force | Out-Null
+
+            robocopy `
+              $sourceRoaming `
+              $env:HERMES_ROAMING `
+              /E `
+              /COPY:DAT `
+              /DCOPY:DAT `
+              /R:2 `
+              /W:2 `
+              /XJ `
+              /NFL `
+              /NDL `
+              /NP
+
+            $code = $LASTEXITCODE
+
+            if ($code -gt 7) {
+              throw "Hermes Roaming restore failed. Robocopy code: $code"
+            }
+          }
+
+          Write-Host ""
+          Write-Host "Hermes data restored successfully."
+
+          # Robocopy uses 0-7 for successful/non-fatal results.
+          # Force this PowerShell step to report success after validation.
+          exit 0
+
+
+      # ==================================================
+      # RESTORE - VERIFY 9ROUTER
+      # ==================================================
+
+      - name: Restore - Verify 9Router
+        if: ${{ inputs.mode == 'restore' }}
+        shell: pwsh
+        run: |
+          Write-Host "======================================"
+          Write-Host " VERIFYING 9ROUTER"
+          Write-Host "======================================"
+
+          if (-not (Test-Path $env:NINEROUTER_DATA)) {
+            throw "9Router data directory is missing."
+          }
+
+          if (-not (Test-Path "$env:NINEROUTER_DATA\db\data.sqlite")) {
+            throw "9Router database is missing."
+          }
+
+          if (-not (Test-Path "$env:NINEROUTER_DATA\auth\cli-secret")) {
+            throw "9Router auth data is missing."
+          }
+
+          $cmd = Get-Command 9router -ErrorAction SilentlyContinue
+          if (-not $cmd) {
+            throw "9router command is not available after restore."
+          }
+
+          Write-Host "9Router command: $($cmd.Source)"
+          npm list -g 9router --depth=0
+          Write-Host "9Router data: $env:NINEROUTER_DATA"
+          Write-Host "9Router restore verification: OK"
+
+
+      # ==================================================
+      # RESTORE - VERIFY
+      # ==================================================
+
+      - name: Restore - Verify Hermes
+        if: ${{ inputs.mode == 'restore' }}
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host " VERIFYING HERMES"
+          Write-Host "======================================"
+
+          if (-not (Test-Path $env:HERMES_LOCAL)) {
+            throw "Hermes Local is missing."
+          }
+
+          Write-Host "Hermes Local: OK"
+
+          $hermesExe = Get-ChildItem `
+            $env:HERMES_LOCAL `
+            -Filter "Hermes.exe" `
+            -Recurse `
+            -File `
+            -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          if ($hermesExe) {
+
+            Write-Host ""
+            Write-Host "Hermes Desktop:"
+            Write-Host $hermesExe.FullName
+
+          }
+          else {
+
+            Write-Host ""
+            Write-Warning "Hermes.exe was not found."
+            Write-Host "Hermes Agent runtime/data was restored."
+          }
+
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host " RESTORE COMPLETE"
+          Write-Host "======================================"
+
+
+      # ==================================================
+      # RESTORE - KEEP VPS ALIVE
+      # ==================================================
+
+      - name: Restore - Keep VPS alive
+        if: ${{ always() && inputs.mode == 'restore' }}
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "======================================"
+          Write-Host " RESTORED VPS IS READY"
+          Write-Host "======================================"
+
+          $start = [DateTime]::Parse(
+            $env:VPS_SESSION_START
+          ).ToUniversalTime()
+
+          $end = $start.AddMinutes(355)
+
+          Write-Host "VPS will stay alive until:"
+          Write-Host $end
+
+          while ((Get-Date).ToUniversalTime() -lt $end) {
+
+            $remaining = $end - (Get-Date).ToUniversalTime()
+
+            Write-Host (
+              "Remaining: {0:hh\:mm\:ss}" -f $remaining
+            )
+
+            Start-Sleep -Seconds 30
+          }
+
+          Write-Host "Restore VPS lifetime finished."
