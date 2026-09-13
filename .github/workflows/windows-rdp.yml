@@ -822,13 +822,29 @@ jobs:
           Write-Host " INSTALLING 9ROUTER"
           Write-Host "======================================"
 
-          $versionFile = "$env:VPS_ROOT\Restore\Extracted\9Router\version.txt"
+          Write-Host "Searching for 9Router version file..."
 
-          if (-not (Test-Path $versionFile)) {
+          $versionFile = Get-ChildItem `
+            -Path "$env:VPS_ROOT\Restore\Extracted" `
+            -Filter "version.txt" `
+            -File `
+            -Recurse `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.FullName -match "(?i)9Router"
+            } |
+            Select-Object -First 1
+
+          if (-not $versionFile) {
+            Write-Host "Extracted backup contents:"
+            Get-ChildItem "$env:VPS_ROOT\Restore\Extracted" -Recurse |
+              Select-Object FullName |
+              Format-Table -AutoSize
             throw "9Router version file is missing from the backup."
           }
 
-          $version = (Get-Content $versionFile -Raw).Trim()
+          Write-Host "Version file found: $($versionFile.FullName)"
+          $version = (Get-Content $versionFile.FullName -Raw).Trim()
           if ($version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
             throw "Invalid 9Router version in backup: $version"
           }
@@ -861,7 +877,23 @@ jobs:
           Write-Host " RESTORING 9ROUTER DATA"
           Write-Host "======================================"
 
-          $source = "$env:VPS_ROOT\Restore\Extracted\9Router\Data"
+          $versionFile = Get-ChildItem `
+            -Path "$env:VPS_ROOT\Restore\Extracted" `
+            -Filter "version.txt" `
+            -File `
+            -Recurse `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.FullName -match "(?i)9Router"
+            } |
+            Select-Object -First 1
+
+          if (-not $versionFile) {
+            throw "Could not locate 9Router version.txt in extracted backup."
+          }
+
+          $routerRoot = $versionFile.Directory.FullName
+          $source = Join-Path $routerRoot "Data"
           $destination = $env:NINEROUTER_DATA
 
           if (-not (Test-Path $source)) {
@@ -1030,11 +1062,23 @@ jobs:
           Write-Host " RESTORING HERMES DATA"
           Write-Host "======================================"
 
-          $sourceLocal = `
-            "$env:VPS_ROOT\Restore\Extracted\Hermes\Local"
+          $hermesFolder = Get-ChildItem `
+            -Path "$env:VPS_ROOT\Restore\Extracted" `
+            -Directory `
+            -Recurse `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+              $_.Name -eq "Hermes" -and
+              (Test-Path (Join-Path $_.FullName "Local"))
+            } |
+            Select-Object -First 1
 
-          $sourceRoaming = `
-            "$env:VPS_ROOT\Restore\Extracted\Hermes\Roaming"
+          if (-not $hermesFolder) {
+            throw "Hermes backup folder was not found in extracted backup."
+          }
+
+          $sourceLocal = Join-Path $hermesFolder.FullName "Local"
+          $sourceRoaming = Join-Path $hermesFolder.FullName "Roaming"
 
           # ------------------------------------------
           # LOCAL
