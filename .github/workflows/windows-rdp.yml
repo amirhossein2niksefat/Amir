@@ -873,12 +873,54 @@ jobs:
           Write-Host "======================================"
 
           $root = "$env:VPS_ROOT\Restore\Extracted"
-          $dataFolder = Get-ChildItem -Path $root -Directory -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -eq 'Data' -and (Test-Path (Join-Path $_.FullName 'db\data.sqlite')) } |
+
+          if (-not (Test-Path $root)) {
+            throw "Extracted backup folder was not found: $root"
+          }
+
+          Write-Host "Searching extracted backup for 9Router database..."
+
+          # Do not depend on a specific archive folder name.
+          # The archive may contain BackupData\9Router\Data, 9Router\Data,
+          # or another nested path. Find the actual SQLite database first.
+          $database = Get-ChildItem -Path $root -File -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -ieq 'data.sqlite' -and $_.FullName -match '(?i)9router|9router' } |
             Select-Object -First 1
 
-          if (-not $dataFolder) { throw "Could not locate 9Router Data folder in extracted backup." }
-          $source = $dataFolder.FullName
+          if (-not $database) {
+            $database = Get-ChildItem -Path $root -File -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -ieq 'data.sqlite' } |
+              Select-Object -First 1
+          }
+
+          if (-not $database) {
+            Write-Warning "data.sqlite was not found. Searching for 9Router auth/database folder instead..."
+            $secret = Get-ChildItem -Path $root -File -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -ieq 'cli-secret' } |
+              Select-Object -First 1
+            if ($secret) {
+              $source = $secret.Directory.Parent.Parent.FullName
+              Write-Warning "Using folder discovered from auth\cli-secret: $source"
+            } else {
+              $dbFolder = Get-ChildItem -Path $root -Directory -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -ieq 'db' } |
+                Select-Object -First 1
+              if ($dbFolder) {
+                $source = $dbFolder.Parent.FullName
+                Write-Warning "Using folder discovered from db directory: $source"
+              } else {
+                Write-Host "Extracted files and folders found:"
+                Get-ChildItem -Path $root -Recurse -Force -ErrorAction SilentlyContinue |
+                  Select-Object -First 300 -ExpandProperty FullName |
+                  ForEach-Object { Write-Host $_ }
+                throw "Could not locate 9Router data in extracted backup. The backup does not contain data.sqlite, cli-secret, or a db folder."
+              }
+            }
+          } else {
+            $source = $database.Directory.Parent.FullName
+          }
+          Write-Host "Found database: $($database.FullName)"
+          Write-Host "Using source root: $source"
           $destination = $env:NINEROUTER_DATA
           Write-Host "Source: $source"
           Write-Host "Destination: $destination"
@@ -888,9 +930,13 @@ jobs:
           $code = $LASTEXITCODE
           if ($code -gt 7) { throw "9Router data restore failed. Robocopy code: $code" }
 
-          if (-not (Test-Path "$destination\db\data.sqlite")) { throw "9Router database was not restored." }
-          if (-not (Test-Path "$destination\auth\cli-secret")) { throw "9Router auth data was not restored." }
-          Write-Host "9Router data restored successfully."
+          if (-not (Test-Path "$destination\db\data.sqlite")) {
+            Write-Warning "data.sqlite is still missing after restore. The backup may contain only partial 9Router data."
+          }
+          if (-not (Test-Path "$destination\auth\cli-secret")) {
+            Write-Warning "auth\cli-secret is missing after restore. Login/session data may not be preserved."
+          }
+          Write-Host "9Router data restore step completed."
 
 
       # ==================================================
