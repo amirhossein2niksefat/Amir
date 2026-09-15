@@ -977,6 +977,10 @@ jobs:
             Write-Warning "auth\cli-secret is missing after restore. Login/session data may not be preserved."
           }
           Write-Host "9Router data restore step completed."
+          # Robocopy returns 0-7 for successful/non-fatal results.
+          # Explicitly reset the PowerShell process exit code so GitHub Actions
+          # does not interpret the last native robocopy code as a failure.
+          exit 0
 
 
       # ==================================================
