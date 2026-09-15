@@ -823,7 +823,10 @@ jobs:
           Write-Host " INSTALLING 9ROUTER"
           Write-Host "======================================"
 
-          $root = "$env:VPS_ROOT\Restore\Extracted"
+          $restoreRoot = "$env:VPS_ROOT\Restore"
+          $root = @("$restoreRoot\Extracted", "$restoreRoot\Extracted\BackupData", "$restoreRoot\BackupData", "$restoreRoot\Artifact\Extracted", "$restoreRoot\Artifact\BackupData") |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $root) { $root = $restoreRoot }
           $version = $null
 
           $versionFile = Get-ChildItem -Path $root -Filter "version.txt" -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -872,12 +875,28 @@ jobs:
           Write-Host " RESTORING 9ROUTER DATA"
           Write-Host "======================================"
 
-          $root = "$env:VPS_ROOT\Restore\Extracted"
+          $restoreRoot = "$env:VPS_ROOT\Restore"
+          $rootCandidates = @(
+            "$restoreRoot\Extracted",
+            "$restoreRoot\Extracted\BackupData",
+            "$restoreRoot\BackupData",
+            "$restoreRoot\Artifact\Extracted",
+            "$restoreRoot\Artifact\BackupData"
+          )
 
-          if (-not (Test-Path $root)) {
-            throw "Extracted backup folder was not found: $root"
+          $root = $rootCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if (-not $root) {
+            Write-Host "Restore directory contents:"
+            if (Test-Path $restoreRoot) {
+              Get-ChildItem -Path $restoreRoot -Recurse -Force -ErrorAction SilentlyContinue |
+                Select-Object -First 300 -ExpandProperty FullName |
+                ForEach-Object { Write-Host $_ }
+            }
+            throw "Could not find extracted backup directory under: $restoreRoot"
           }
 
+          Write-Host "Using extracted backup root: $root"
           Write-Host "Searching extracted backup for 9Router database..."
 
           # Do not depend on a specific archive folder name.
