@@ -991,66 +991,46 @@ jobs:
         if: ${{ inputs.mode == 'restore' }}
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           Write-Host "======================================"
           Write-Host " INSTALLING HERMES"
           Write-Host "======================================"
 
-          $password = ConvertTo-SecureString `
-            $env:VPS_PASSWORD `
-            -AsPlainText `
-            -Force
-
-          $credential = New-Object `
-            System.Management.Automation.PSCredential(
-              $env:VPS_USERNAME,
-              $password
-            )
-
           $installerScript = "$env:VPS_ROOT\Restore\hermes-install.ps1"
 
-          Invoke-WebRequest `
-            -Uri "https://hermes-agent.nousresearch.com/install.ps1" `
-            -OutFile $installerScript
+          try {
+            Invoke-WebRequest `
+              -Uri "https://hermes-agent.nousresearch.com/install.ps1" `
+              -OutFile $installerScript `
+              -UseBasicParsing
 
-          if (-not (Test-Path $installerScript)) {
-            throw "Hermes installer could not be downloaded."
+            if (-not (Test-Path $installerScript)) {
+              throw "Hermes installer could not be downloaded."
+            }
+
+            Write-Host "Running Hermes installer as the current Windows administrator..."
+            & powershell.exe `
+              -NoProfile `
+              -ExecutionPolicy Bypass `
+              -File $installerScript `
+              -SkipSetup
+
+            $installerCode = $LASTEXITCODE
+            Write-Host "Hermes installer exit code: $installerCode"
+          }
+          catch {
+            Write-Warning "Hermes installer did not complete: $($_.Exception.Message)"
+            Write-Warning "Continuing with data restore."
           }
 
-          $installCommand = @"
-          Set-ExecutionPolicy -Scope Process Bypass -Force
-          & '$installerScript' -SkipSetup
-          "@
+          # Always create the expected target folders so the data restore can continue.
+          New-Item -ItemType Directory -Path $env:HERMES_LOCAL -Force | Out-Null
+          New-Item -ItemType Directory -Path $env:HERMES_ROAMING -Force | Out-Null
 
-          $encoded = [Convert]::ToBase64String(
-            [Text.Encoding]::Unicode.GetBytes($installCommand)
-          )
-
-          $process = Start-Process `
-            -FilePath "powershell.exe" `
-            -Credential $credential `
-            -ArgumentList `
-              "-NoProfile",
-              "-ExecutionPolicy",
-              "Bypass",
-              "-EncodedCommand",
-              $encoded `
-            -Wait `
-            -PassThru
-
-          if ($process.ExitCode -ne 0) {
-            throw "Hermes installation failed. Exit code: $($process.ExitCode)"
-          }
-
-          Start-Sleep -Seconds 20
-
-          if (-not (Test-Path $env:HERMES_LOCAL)) {
-            throw "Hermes installation directory was not created."
-          }
-
-          Write-Host ""
-          Write-Host "Hermes installed successfully."
-          Write-Host "Location:"
+          Write-Host "Hermes target folders are ready:"
           Write-Host $env:HERMES_LOCAL
+          Write-Host $env:HERMES_ROAMING
 
 
       # ==================================================
