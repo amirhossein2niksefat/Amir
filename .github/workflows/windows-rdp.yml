@@ -876,6 +876,27 @@ jobs:
           Write-Host "======================================"
 
           $restoreRoot = "$env:VPS_ROOT\Restore"
+          $extractFolder = "$restoreRoot\Extracted"
+
+          # Safety fallback: extract the 7z archive here if the previous
+          # extraction step was skipped or ran in the wrong order.
+          if (-not (Test-Path $extractFolder)) {
+            if (-not $env:BACKUP_ARCHIVE -or -not (Test-Path $env:BACKUP_ARCHIVE)) {
+              throw "Backup archive is missing: $env:BACKUP_ARCHIVE"
+            }
+            if (-not $env:SEVENZIP -or -not (Test-Path $env:SEVENZIP)) {
+              throw "7-Zip executable is missing: $env:SEVENZIP"
+            }
+
+            New-Item -ItemType Directory -Path $extractFolder -Force | Out-Null
+            Write-Host "Extracted folder was missing. Extracting backup now..."
+            & "$env:SEVENZIP" x "$env:BACKUP_ARCHIVE" "-o$extractFolder" "-p$env:BACKUP_ENCRYPTION_KEY" "-y"
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Backup archive extraction failed. Exit code: $LASTEXITCODE"
+            }
+          }
+
           $rootCandidates = @(
             "$restoreRoot\Extracted",
             "$restoreRoot\Extracted\BackupData",
